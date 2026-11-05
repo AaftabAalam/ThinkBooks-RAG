@@ -1,0 +1,31 @@
+# Environment variables & local secrets
+.env
+.env.local
+.env.*.local
+
+# Python virtual environment
+.env/
+venv/
+ENV/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.manifest
+*.spec
+
+# IDEs and Editors (VS Code, PyCharm, etc.)
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Runtime data (Milvus Lite store, uploaded files)
+data/milvus.db/
+data/uploads/
+*.db
