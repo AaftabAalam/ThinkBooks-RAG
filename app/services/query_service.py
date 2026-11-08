@@ -1,7 +1,8 @@
 import logging
+import re
 import time
 
-from app.api.schemas import QueryRequest, QueryResponse, Source, normalize_query
+from app.api.schemas import Citation, QueryRequest, QueryResponse, Source, normalize_query
 from app.cache import redis_cache
 from app.core.config import get_settings
 from app.db import repository
@@ -14,6 +15,7 @@ from app.vectorstore import milvus_store
 logger = logging.getLogger(__name__)
 
 NO_CONTENT_ANSWER = "I couldn't find any relevant information in the documents you have access to."
+_CITATION = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 def _ms(start: float) -> int:
@@ -25,13 +27,29 @@ def _from_cache(entry: dict, req: QueryRequest) -> bool:
     return repository.validate_sources(entry["sources"], req.roles)
 
 
+def _link_citations(answer: str, sources: list[Source]) -> list[Citation]:
+    citations = []
+    seen = set()
+    for match in _CITATION.finditer(answer):
+        for value in match.group(1).split(","):
+            number = int(value.strip())
+            if number < 1 or number > len(sources):
+                raise ValueError(f"Generated answer cites source [{number}], but only {len(sources)} sources were provided")
+            if number not in seen:
+                citations.append(Citation(number=number, source=sources[number - 1]))
+                seen.add(number)
+    return citations
+
+
 def _cached_response(entry: dict, kind: str, normalized: str, timings: dict, similarity: float | None = None):
+    sources = [Source(**s) for s in entry["sources"]]
     return QueryResponse(
         answer=entry["answer"],
         cache=kind,
         similarity=similarity,
         normalized_query=normalized,
-        sources=[Source(**s) for s in entry["sources"]],
+        sources=sources,
+        citations=_link_citations(entry["answer"], sources),
         timings_ms=timings,
     )
 
@@ -53,10 +71,10 @@ def answer_query(req: QueryRequest) -> QueryResponse:
         timings["exact_cache"] = _ms(t)
 
     t = time.perf_counter()
-    query_vector = embed_texts([normalized])[0]
+    query_vector = embed_texts([normalized], task="search_query")[0]
     timings["embed"] = _ms(t)
 
-    if req.use_cache:
+    if req.use_cache and s.semantic_cache_enabled:
         t = time.perf_counter()
         found = redis_cache.get_semantic(query_vector)
         timings["semantic_cache"] = _ms(t)
@@ -90,9 +108,19 @@ def answer_query(req: QueryRequest) -> QueryResponse:
             chunk_id=h["chunk_id"],
             chunk_type=h["chunk_type"],
             rerank_score=round(h["rerank_score"], 4),
+            pages=(h.get("metadata") or {}).get("pages") or [],
+            headings=(h.get("metadata") or {}).get("headings") or [],
         )
         for h in used
     ]
+    citations = _link_citations(answer, sources)
     if req.use_cache:
-        redis_cache.store(normalized, query_vector, {"answer": answer, "sources": [x.model_dump() for x in sources]})
-    return QueryResponse(answer=answer, cache="miss", normalized_query=normalized, sources=sources, timings_ms=timings)
+        redis_cache.store(normalized, query_vector, {
+            "answer": answer,
+            "sources": [x.model_dump() for x in sources],
+            "citations": [x.model_dump() for x in citations],
+        })
+    return QueryResponse(
+        answer=answer, cache="miss", normalized_query=normalized, sources=sources,
+        citations=citations, timings_ms=timings,
+    )

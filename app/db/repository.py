@@ -130,6 +130,16 @@ def set_version_status(version_id: str, status: str, error: str | None = None) -
         )
 
 
+def set_version_stored_path(version_id: str, stored_path: str) -> None:
+    with get_pool().connection() as conn:
+        updated = conn.execute(
+            "UPDATE document_versions SET stored_path = %s WHERE id = %s",
+            (stored_path, version_id),
+        )
+        if updated.rowcount != 1:
+            raise ValueError(f"Unknown document version {version_id}")
+
+
 def replace_chunks(document_id: str, version_id: str, chunks: list[dict]) -> None:
     """Swap in the new version's chunks and mark the version processed, atomically."""
     with get_pool().connection() as conn, conn.transaction():

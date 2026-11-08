@@ -16,18 +16,21 @@ class Settings(BaseSettings):
     milvus_collection: str = "document_chunks"
     redis_url: str = "redis://localhost:6379/0"
 
-    embedding_model: str = "BAAI/bge-m3"
-    embedding_dim: int = 1024
+    embedding_model: str = "nomic-ai/nomic-embed-text-v1.5"
+    embedding_dim: int = 768
     reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
     llm_model: str = "mlx-community/Qwen3.5-4B-MLX-4bit"
 
     chunk_tokenizer: str = "BAAI/bge-m3"
     chunk_text_tokens: int = 1024
     chunk_table_rows: int = 12
+    pdf_do_ocr: bool = True
+    ocr_language: str = "eng"
     embedding_batch_size: int = 8
-    embedding_max_seq_length: int = 2048
+    embedding_max_seq_length: int = 8192
 
     # Query pipeline
+    semantic_cache_enabled: bool = False
     semantic_cache_threshold: float = 0.90
     semantic_cache_max_entries: int = 1000
     cache_ttl_seconds: int = 86400

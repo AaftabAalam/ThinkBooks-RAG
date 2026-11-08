@@ -37,7 +37,13 @@ def chunk_blocks(
 
     for block_no, block in enumerate(blocks):
         if block.kind == "table":
-            pieces = [(c.text, _row_count(c.text)) for c in _table_chunker().chunk(block.content)]
+            lines = [line for line in block.content.splitlines() if line.strip()]
+            if len(lines) == 2:
+                pieces = [(block.content, 0)]
+            else:
+                pieces = [(c.text, _row_count(c.text)) for c in _table_chunker().chunk(block.content)]
+                if not pieces and block.content.strip():
+                    raise ValueError(f"Unable to chunk table in block {block_no}")
         else:
             pieces = [(c.text, c.token_count) for c in _text_chunker().chunk(block.content)]
 

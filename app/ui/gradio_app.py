@@ -43,8 +43,14 @@ def _handle_query(question: str, roles: str, use_cache: bool) -> tuple[str, str]
     except Exception as e:
         return "", f"Query failed: {e}"
     sim = f" (similarity {res.similarity:.3f})" if res.similarity is not None else ""
-    sources = "\n".join(f"- {s.filename} v{s.version} [{s.chunk_type}]" for s in res.sources) or "none"
-    info = f"Cache: {res.cache}{sim}\nTimings (ms): {res.timings_ms}\nSources:\n{sources}"
+    sources = "\n".join(
+        f"[{i}] {s.filename} v{s.version} [{s.chunk_type}] "
+        f"(document {s.document_id}, chunk {s.chunk_id})"
+        + (f" pages {', '.join(map(str, s.pages))}" if s.pages else "")
+        for i, s in enumerate(res.sources, 1)
+    ) or "none"
+    cited = ", ".join(f"[{c.number}]" for c in res.citations) or "none"
+    info = f"Cache: {res.cache}{sim}\nTimings (ms): {res.timings_ms}\nCited sources: {cited}\nContext sources:\n{sources}"
     return res.answer, info
 
 

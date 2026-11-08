@@ -13,9 +13,6 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 _PREFIX = "rag:cache:"
-_EXACT = _PREFIX + "exact:"
-_SEM = _PREFIX + "sem:"
-_SEM_INDEX = _PREFIX + "semindex"  # sorted set of semantic entry ids by creation time
 EVENTS_CHANNEL = "rag:events"
 
 
@@ -24,8 +21,14 @@ def _redis() -> redis.Redis:
     return redis.Redis.from_url(get_settings().redis_url, socket_timeout=2, socket_connect_timeout=2)
 
 
+def _namespace() -> str:
+    s = get_settings()
+    model = hashlib.sha256(f"{s.embedding_model}|{s.embedding_dim}".encode()).hexdigest()[:16]
+    return f"{_PREFIX}v5:{s.milvus_collection}:{model}:"
+
+
 def _exact_key(normalized_query: str) -> str:
-    return _EXACT + hashlib.sha256(normalized_query.encode()).hexdigest()
+    return _namespace() + "exact:" + hashlib.sha256(normalized_query.encode()).hexdigest()
 
 
 def get_exact(normalized_query: str) -> dict | None:
@@ -42,16 +45,18 @@ def get_semantic(query_vector: list[float]) -> tuple[dict, float] | None:
     s = get_settings()
     try:
         r = _redis()
-        ids = [i.decode() for i in r.zrevrange(_SEM_INDEX, 0, s.semantic_cache_max_entries - 1)]
+        sem = _namespace() + "sem:"
+        sem_index = _namespace() + "semindex"
+        ids = [i.decode() for i in r.zrevrange(sem_index, 0, s.semantic_cache_max_entries - 1)]
         if not ids:
             return None
         pipe = r.pipeline(transaction=False)
         for i in ids:
-            pipe.hmget(_SEM + i, "emb", "entry")
+            pipe.hmget(sem + i, "emb", "entry")
         rows = pipe.execute()
         live = [(i, row) for i, row in zip(ids, rows) if row[0] is not None]
         for i in set(ids) - {i for i, _ in live}:  # expired entries
-            r.zrem(_SEM_INDEX, i)
+            r.zrem(sem_index, i)
         if not live:
             return None
         matrix = np.vstack([np.frombuffer(row[0], dtype=np.float32) for _, row in live])
@@ -73,18 +78,22 @@ def store(normalized_query: str, query_vector: list[float], entry: dict) -> None
     try:
         r = _redis()
         r.set(_exact_key(normalized_query), payload, ex=s.cache_ttl_seconds)
+        if not s.semantic_cache_enabled:
+            return
+        sem = _namespace() + "sem:"
+        sem_index = _namespace() + "semindex"
         sem_id = uuid.uuid4().hex
-        key = _SEM + sem_id
+        key = sem + sem_id
         pipe = r.pipeline()
         pipe.hset(key, mapping={"emb": np.asarray(query_vector, dtype=np.float32).tobytes(), "entry": payload})
         pipe.expire(key, s.cache_ttl_seconds)
-        pipe.zadd(_SEM_INDEX, {sem_id: time.time()})
+        pipe.zadd(sem_index, {sem_id: time.time()})
         pipe.execute()
-        overflow = r.zcard(_SEM_INDEX) - s.semantic_cache_max_entries
+        overflow = r.zcard(sem_index) - s.semantic_cache_max_entries
         if overflow > 0:
-            for old in r.zrange(_SEM_INDEX, 0, overflow - 1):
-                r.delete(_SEM + old.decode())
-                r.zrem(_SEM_INDEX, old)
+            for old in r.zrange(sem_index, 0, overflow - 1):
+                r.delete(sem + old.decode())
+                r.zrem(sem_index, old)
     except redis.RedisError:
         logger.warning("Redis unavailable; answer not cached", exc_info=True)
 

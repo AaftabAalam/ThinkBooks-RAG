@@ -37,6 +37,13 @@ class Source(BaseModel):
     chunk_id: str
     chunk_type: str
     rerank_score: float | None = None
+    pages: list[int] = Field(default_factory=list)
+    headings: list[str] = Field(default_factory=list)
+
+
+class Citation(BaseModel):
+    number: int
+    source: Source
 
 
 class QueryResponse(BaseModel):
@@ -46,3 +53,4 @@ class QueryResponse(BaseModel):
     normalized_query: str
     sources: list[Source]
     timings_ms: dict[str, int]
+    citations: list[Citation] = Field(default_factory=list)

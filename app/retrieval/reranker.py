@@ -1,3 +1,4 @@
+import inspect
 import threading
 from functools import lru_cache
 
@@ -5,6 +6,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from app.core.config import get_settings
+from app.retrieval.context import retrieval_text
 
 _PREFIX = (
     "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the "
@@ -25,6 +27,7 @@ def _load():
     return {
         "tokenizer": tokenizer,
         "model": model,
+        "last_logits_only": "logits_to_keep" in inspect.signature(model.forward).parameters,
         "device": device,
         "yes": tokenizer.convert_tokens_to_ids("yes"),
         "no": tokenizer.convert_tokens_to_ids("no"),
@@ -51,7 +54,8 @@ def rerank_scores(query: str, documents: list[str]) -> list[float]:
             ids = tok(bodies, add_special_tokens=False, truncation=True, max_length=budget)["input_ids"]
             ids = [m["prefix"] + x + m["suffix"] for x in ids]
             batch = tok.pad({"input_ids": ids}, padding=True, return_tensors="pt").to(m["device"])
-            logits = m["model"](**batch).logits[:, -1, :].float()
+            kwargs = {"logits_to_keep": 1} if m["last_logits_only"] else {}
+            logits = m["model"](**batch, **kwargs).logits[:, -1, :].float()
             pair = torch.stack([logits[:, m["no"]], logits[:, m["yes"]]], dim=1)
             scores.extend(torch.softmax(pair, dim=1)[:, 1].tolist())
     return scores
@@ -59,6 +63,6 @@ def rerank_scores(query: str, documents: list[str]) -> list[float]:
 
 def rerank(query: str, hits: list[dict], top_n: int | None = None) -> list[dict]:
     top_n = top_n or get_settings().rerank_top_n
-    scores = rerank_scores(query, [h["text"] for h in hits])
+    scores = rerank_scores(query, [retrieval_text(h["text"], h.get("metadata") or {}) for h in hits])
     ranked = sorted(zip(hits, scores), key=lambda p: p[1], reverse=True)[:top_n]
     return [{**h, "rerank_score": sc} for h, sc in ranked]

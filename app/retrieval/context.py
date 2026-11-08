@@ -1,6 +1,11 @@
 from typing import Callable
 
 
+def retrieval_text(text: str, metadata: dict) -> str:
+    headings = metadata.get("headings") or []
+    return f"{' > '.join(headings)}\n\n{text}" if headings else text
+
+
 def _label(hit: dict) -> str:
     meta = hit.get("metadata") or {}
     parts = [hit["filename"]]

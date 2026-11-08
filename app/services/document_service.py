@@ -55,9 +55,19 @@ def register_upload(filename: str, data: bytes, acl_roles: list[str] | None = No
         stored_path=str(path),
         acl_roles=parse_roles(acl_roles),
     )
-    if reg.action in (NEW, UPDATED):  # unchanged/retry reuse the file already on disk
+    store_file = reg.action in (NEW, UPDATED)
+    restore_retry = False
+    if reg.action == RETRY:
+        version = repository.get_version(reg.version_id)
+        if version is None:
+            raise ValueError(f"Unknown document version {reg.version_id}")
+        restore_retry = not Path(version["stored_path"]).is_file()
+        store_file = restore_retry
+    if store_file:
         try:
             path.write_bytes(data)
+            if restore_retry:
+                repository.set_version_stored_path(reg.version_id, str(path))
         except Exception:
             repository.set_version_status(reg.version_id, "failed", "Could not store file on disk.")
             raise

@@ -1,5 +1,12 @@
 chonkie>=1.7.0
-docling>=2.147.0
+pdf-oxide==0.3.78
+pdfplumber>=0.11.9,<1
+pypdfium2>=5.15.1,<6
+Pillow>=10.1,<13
+python-docx>=1.2.0,<2
+python-pptx>=1.0.2,<2
+openpyxl>=3.1.5,<4
+beautifulsoup4>=4.15.0,<5
 fastapi>=0.162.0
 gradio>=6.31.0
 huggingface_hub>=1.0,<2
