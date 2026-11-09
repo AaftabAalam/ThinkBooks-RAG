@@ -22,13 +22,27 @@ def assemble_context(hits: list[dict], max_tokens: int, count_tokens: Callable[[
     """Numbered context blocks in rerank order, stopping at the token budget. Returns (context, used hits)."""
     blocks: list[str] = []
     used: list[dict] = []
-    total = 0
     for hit in hits:
-        block = f"[{len(used) + 1}] ({_label(hit)})\n{hit['text']}"
-        cost = count_tokens(block)
-        if used and total + cost > max_tokens:
-            break
+        prefix = f"[{len(used) + 1}] ({_label(hit)})\n"
+        block = prefix + hit["text"]
+        candidate = "\n\n".join([*blocks, block])
+        if count_tokens(candidate) > max_tokens:
+            if used:
+                break
+            text = hit["text"]
+            low, high = 0, len(text)
+            while low < high:
+                mid = (low + high + 1) // 2
+                if count_tokens(prefix + text[:mid]) <= max_tokens:
+                    low = mid
+                else:
+                    high = mid - 1
+            if low == 0:
+                raise ValueError("Context token budget is too small for the first source label.")
+            block = prefix + text[:low]
+            if count_tokens(block) > max_tokens:
+                raise ValueError("Unable to fit the first source within the context token budget.")
+            hit = {**hit, "text": text[:low]}
         blocks.append(block)
         used.append(hit)
-        total += cost
     return "\n\n".join(blocks), used

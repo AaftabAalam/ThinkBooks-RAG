@@ -1,8 +1,10 @@
 import re
 import threading
+from collections.abc import Iterator
+from contextlib import closing
 from functools import lru_cache
 
-from mlx_lm import generate, load
+from mlx_lm import generate, load, stream_generate
 from mlx_lm.sample_utils import make_sampler
 
 from app.core.config import get_settings
@@ -16,7 +18,8 @@ SYSTEM_PROMPT = (
     "Cite passages that directly support each claim inline as [1], [2], etc. "
     "When identifying a document's authors, distinguish its own author credits from authors "
     "of works cited in its references. "
-    "If the context does not contain the answer, say so plainly instead of guessing."
+    "If the context does not contain the answer, say naturally that the question is not relevant "
+    "to the available information or that the information is not present, instead of guessing."
 )
 
 
@@ -30,20 +33,24 @@ def count_tokens(text: str) -> int:
     return len(tokenizer.encode(text))
 
 
-def generate_answer(question: str, context: str) -> str:
+def _prompt(tokenizer, messages: list[dict[str, str]], enable_thinking: bool) -> str:
+    return tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=enable_thinking,
+    )
+
+
+def _standalone_messages(question: str) -> list[dict[str, str]]:
+    return [{"role": "user", "content": question.strip()}]
+
+
+def _generate(messages: list[dict[str, str]]) -> str:
     s = get_settings()
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
-    ]
     with _lock:
         model, tokenizer = _load()
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            enable_thinking=s.llm_enable_thinking,
-        )
+        prompt = _prompt(tokenizer, messages, s.llm_enable_thinking)
         text = generate(
             model,
             tokenizer,
@@ -53,3 +60,107 @@ def generate_answer(question: str, context: str) -> str:
             verbose=False,
         )
     return _THINK.sub("", text).strip()
+
+
+def generate_answer(question: str, context: str) -> str:
+    return _generate(_answer_messages(question, context))
+
+
+def _answer_messages(question: str, context: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
+    ]
+
+
+def generate_standalone(question: str) -> str:
+    return _generate(_standalone_messages(question))
+
+
+def _visible_fragments(fragments: Iterator[str]) -> Iterator[str]:
+    """Apply the existing thinking-tag and whitespace filtering incrementally."""
+    opening, closing = "<think>", "</think>"
+    pending = ""
+    whitespace = ""
+    started = False
+    skip_whitespace = False
+
+    def clean(text: str) -> str:
+        nonlocal whitespace, started
+        if not started:
+            text = text.lstrip()
+            if not text:
+                return ""
+            started = True
+        text = whitespace + text
+        whitespace = text[len(text.rstrip()):]
+        return text.rstrip()
+
+    for fragment in fragments:
+        pending += fragment
+        while pending:
+            if skip_whitespace:
+                pending = pending.lstrip()
+                if not pending:
+                    break
+                skip_whitespace = False
+            start = pending.find(opening)
+            if start >= 0:
+                prefix = clean(pending[:start])
+                if prefix:
+                    yield prefix
+                pending = pending[start:]
+                end = pending.find(closing, len(opening))
+                if end < 0:
+                    break
+                pending = pending[end + len(closing):]
+                skip_whitespace = True
+                continue
+            retained = 0
+            for size in range(1, min(len(opening) - 1, len(pending)) + 1):
+                if pending.endswith(opening[:size]):
+                    retained = size
+            safe = pending[:-retained] if retained else pending
+            pending = pending[-retained:] if retained else ""
+            visible = clean(safe)
+            if visible:
+                yield visible
+            if pending:
+                break
+    visible = clean(pending)
+    if visible:
+        yield visible
+
+
+def _stream(messages: list[dict[str, str]]) -> Iterator[str]:
+    s = get_settings()
+    with _lock:
+        model, tokenizer = _load()
+        prompt = _prompt(tokenizer, messages, s.llm_enable_thinking)
+        responses = stream_generate(
+            model,
+            tokenizer,
+            prompt=prompt,
+            max_tokens=s.llm_max_tokens,
+            sampler=make_sampler(temp=s.llm_temperature, top_p=s.llm_top_p),
+        )
+        with closing(responses):
+            finish_reason = None
+
+            def fragments():
+                nonlocal finish_reason
+                for response in responses:
+                    finish_reason = response.finish_reason
+                    yield response.text
+
+            yield from _visible_fragments(fragments())
+            if finish_reason == "length":
+                yield "\n\n[The response reached the generation limit and may be incomplete.]"
+
+
+def stream_standalone(question: str) -> Iterator[str]:
+    return _stream(_standalone_messages(question))
+
+
+def stream_answer(question: str, context: str) -> Iterator[str]:
+    return _stream(_answer_messages(question, context))

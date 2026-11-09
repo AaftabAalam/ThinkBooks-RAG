@@ -79,6 +79,23 @@ def needs_processing(reg: Registration) -> bool:
     return reg.action in (NEW, UPDATED, RETRY)
 
 
+def enqueue_processing(reg: Registration) -> bool:
+    if not needs_processing(reg):
+        return False
+    from app.processing.tasks import process_document
+    from app.vectorstore.milvus_store import _is_local_uri
+
+    try:
+        if _is_local_uri(get_settings().milvus_uri):
+            raise RuntimeError("Start a shared Milvus server and configure MILVUS_URI as its URL.")
+        process_document.delay(reg.version_id)
+    except Exception as exc:
+        logger.exception("Could not queue document version %s", reg.version_id)
+        repository.mark_enqueue_failed(reg.version_id, f"Could not queue processing: {exc}"[:1000])
+        raise
+    return True
+
+
 def describe(reg: Registration) -> str:
     return {
         NEW: f"new document registered (v{reg.version})",

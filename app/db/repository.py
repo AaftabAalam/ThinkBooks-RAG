@@ -33,6 +33,7 @@ def register_version(
     """Registry + version check, done atomically under a row lock."""
     roles = acl_roles or ["public"]
     with get_pool().connection() as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (filename,))
         conn.row_factory = dict_row
         conn.execute(
             """INSERT INTO documents (id, filename, content_type, size_bytes, content_hash, acl_roles)
@@ -89,7 +90,9 @@ def register_version(
 def accessible_document_ids(roles: list[str]) -> list[str]:
     with get_pool().connection() as conn:
         rows = conn.execute(
-            "SELECT id::text FROM documents WHERE acl_roles && %s::text[]", (roles,)
+            """SELECT d.id::text FROM documents d JOIN document_versions v
+               ON v.document_id = d.id AND v.version = d.current_version
+               WHERE v.status = 'processed' AND d.acl_roles && %s::text[]""", (roles,)
         ).fetchall()
     return [r[0] for r in rows]
 
@@ -101,7 +104,10 @@ def validate_sources(sources: list[dict], roles: list[str]) -> bool:
     ids = list({s["document_id"] for s in sources})
     with get_pool().connection() as conn:
         rows = conn.execute(
-            "SELECT id::text, current_version, acl_roles FROM documents WHERE id = ANY(%s::uuid[])",
+            """SELECT d.id::text, d.current_version, d.acl_roles
+               FROM documents d JOIN document_versions v
+                 ON v.document_id = d.id AND v.version = d.current_version
+               WHERE v.status = 'processed' AND d.id = ANY(%s::uuid[])""",
             (ids,),
         ).fetchall()
     current = {r[0]: (r[1], set(r[2])) for r in rows}
@@ -116,7 +122,8 @@ def get_version(version_id: str) -> dict | None:
     with get_pool().connection() as conn:
         conn.row_factory = dict_row
         return conn.execute(
-            """SELECT v.id::text, v.document_id::text, v.version, v.sha256, v.stored_path, d.filename
+            """SELECT v.id::text, v.document_id::text, v.version, v.sha256, v.stored_path, d.filename,
+                      v.status, d.current_version
                FROM document_versions v JOIN documents d ON d.id = v.document_id WHERE v.id = %s""",
             (version_id,),
         ).fetchone()
@@ -125,8 +132,38 @@ def get_version(version_id: str) -> dict | None:
 def set_version_status(version_id: str, status: str, error: str | None = None) -> None:
     with get_pool().connection() as conn:
         conn.execute(
-            "UPDATE document_versions SET status = %s, error = %s WHERE id = %s",
+            "UPDATE document_versions SET status = %s, error = %s WHERE id = %s AND status <> 'superseded'",
             (status, error, version_id),
+        )
+
+
+def mark_enqueue_failed(version_id: str, error: str) -> None:
+    with get_pool().connection() as conn:
+        conn.execute(
+            """UPDATE document_versions SET status = 'failed', error = %s
+               WHERE id = %s AND status = 'pending'""",
+            (error, version_id),
+        )
+
+
+def claim_version(version_id: str) -> bool:
+    with get_pool().connection() as conn:
+        result = conn.execute(
+            """UPDATE document_versions v SET status = 'processing', error = NULL
+               FROM documents d WHERE v.id = %s AND d.id = v.document_id
+               AND d.current_version = v.version
+               AND v.status NOT IN ('processed', 'superseded')""",
+            (version_id,),
+        )
+        return result.rowcount == 1
+
+
+def mark_processing_failed(version_id: str, error: str) -> None:
+    with get_pool().connection() as conn:
+        conn.execute(
+            """UPDATE document_versions SET status = 'failed', error = %s
+               WHERE id = %s AND status = 'processing'""",
+            (error, version_id),
         )
 
 

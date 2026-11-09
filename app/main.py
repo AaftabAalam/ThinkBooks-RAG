@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 
 import gradio as gr
 from fastapi import FastAPI
@@ -6,6 +7,7 @@ from fastapi import FastAPI
 from app.api.routes import documents, query
 from app.core.logging import setup_logging
 from app.db.session import close_pool, init_db
+from app.llm.generator import _load
 from app.ui.gradio_app import build_ui
 
 
@@ -13,6 +15,7 @@ from app.ui.gradio_app import build_ui
 async def lifespan(_: FastAPI):
     setup_logging()
     init_db()
+    await asyncio.to_thread(_load)
     yield
     close_pool()
 

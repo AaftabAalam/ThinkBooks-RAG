@@ -1,12 +1,15 @@
 import os
+import logging
+from contextlib import closing
 
 import gradio as gr
 from pydantic import ValidationError
 
 from app.api.schemas import QueryRequest
-from app.processing.pipeline import process_version
-from app.services.document_service import UploadError, describe, needs_processing, register_upload
-from app.services.query_service import answer_query
+from app.services.document_service import UploadError, describe, enqueue_processing, register_upload
+from app.services.query_service import stream_query
+
+logger = logging.getLogger(__name__)
 
 
 def _handle_upload(files: list[str] | None, roles: str) -> str:
@@ -19,39 +22,35 @@ def _handle_upload(files: list[str] | None, roles: str) -> str:
             with open(path, "rb") as fh:
                 reg = register_upload(name, fh.read(), roles)
             msg = describe(reg)
-            if needs_processing(reg):
-                count = process_version(reg.version_id)
-                msg += (
-                    f"; parsed, chunked ({count} chunks), embedded, indexed (dense + BM25) "
-                    "in Milvus, and answer cache invalidated"
-                )
+            if enqueue_processing(reg):
+                msg += "; queued for background processing"
             lines.append(f"✅ {name}: {msg}")
         except UploadError as e:
             lines.append(f"❌ {name}: {e}")
         except Exception as e:  # keep the UI alive on infra/processing errors
-            lines.append(f"❌ {name}: processing failed ({e})")
+            logger.exception("Upload failed for %s", name)
+            lines.append(f"❌ {name}: upload or queue failed ({e})")
     return "\n".join(lines)
 
 
-def _handle_query(question: str, roles: str, use_cache: bool) -> tuple[str, str]:
+def _handle_query(question: str, roles: str, use_cache: bool):
     try:
         req = QueryRequest(query=question or "", roles=[r for r in roles.split(",")], use_cache=use_cache)
     except ValidationError as e:
-        return "", "Invalid query: " + "; ".join(err["msg"] for err in e.errors())
+        yield "", "Invalid query: " + "; ".join(err["msg"] for err in e.errors())
+        return
+    answer = ""
     try:
-        res = answer_query(req)
+        with closing(stream_query(req)) as events:
+            for fragment, response in events:
+                answer += fragment
+                if response is None:
+                    yield answer, "Generating..."
+                else:
+                    yield answer, f"Total time: {response.timings_ms['total'] / 1000:.2f} s"
     except Exception as e:
-        return "", f"Query failed: {e}"
-    sim = f" (similarity {res.similarity:.3f})" if res.similarity is not None else ""
-    sources = "\n".join(
-        f"[{i}] {s.filename} v{s.version} [{s.chunk_type}] "
-        f"(document {s.document_id}, chunk {s.chunk_id})"
-        + (f" pages {', '.join(map(str, s.pages))}" if s.pages else "")
-        for i, s in enumerate(res.sources, 1)
-    ) or "none"
-    cited = ", ".join(f"[{c.number}]" for c in res.citations) or "none"
-    info = f"Cache: {res.cache}{sim}\nTimings (ms): {res.timings_ms}\nCited sources: {cited}\nContext sources:\n{sources}"
-    return res.answer, info
+        logger.exception("Query failed")
+        yield answer, f"Query failed: {e}"
 
 
 def build_ui() -> gr.Blocks:
@@ -62,13 +61,13 @@ def build_ui() -> gr.Blocks:
             up_roles = gr.Textbox(label="Allowed roles (comma-separated)", value="public")
             btn = gr.Button("Upload", variant="primary")
             out = gr.Textbox(label="Status", lines=6, interactive=False)
-            btn.click(_handle_upload, inputs=[files, up_roles], outputs=out)
+            btn.click(_handle_upload, inputs=[files, up_roles], outputs=out, concurrency_limit=None)
         with gr.Tab("Ask"):
             question = gr.Textbox(label="Question", lines=2)
             q_roles = gr.Textbox(label="Your roles (comma-separated)", value="public")
             use_cache = gr.Checkbox(label="Use cache", value=True)
             ask = gr.Button("Ask", variant="primary")
             answer = gr.Markdown()
-            info = gr.Textbox(label="Details", lines=6, interactive=False)
+            info = gr.Textbox(label="Status and total time", interactive=False)
             ask.click(_handle_query, inputs=[question, q_roles, use_cache], outputs=[answer, info])
     return demo

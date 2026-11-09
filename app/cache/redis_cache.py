@@ -23,7 +23,10 @@ def _redis() -> redis.Redis:
 
 def _namespace() -> str:
     s = get_settings()
-    model = hashlib.sha256(f"{s.embedding_model}|{s.embedding_dim}".encode()).hexdigest()[:16]
+    model = hashlib.sha256(
+        f"{s.embedding_model}|{s.embedding_dim}|{s.llm_model}|{s.llm_max_tokens}|"
+        f"{s.context_max_tokens}|{s.reranker_model}|{s.retrieval_top_k}|{s.rerank_top_n}".encode()
+    ).hexdigest()[:16]
     return f"{_PREFIX}v5:{s.milvus_collection}:{model}:"
 
 

@@ -1,20 +1,22 @@
 import logging
 import re
 import time
+from collections.abc import Iterator
+from contextlib import closing
 
 from app.api.schemas import Citation, QueryRequest, QueryResponse, Source, normalize_query
 from app.cache import redis_cache
 from app.core.config import get_settings
 from app.db import repository
 from app.embedding.embedder import embed_texts
-from app.llm.generator import count_tokens, generate_answer
+from app.llm.generator import count_tokens, stream_answer
 from app.retrieval.context import assemble_context
 from app.retrieval.reranker import rerank
 from app.vectorstore import milvus_store
 
 logger = logging.getLogger(__name__)
 
-NO_CONTENT_ANSWER = "I couldn't find any relevant information in the documents you have access to."
+NO_CONTENT_ANSWER = "Your question does not appear to be relevant to the documents you have access to."
 _CITATION = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
@@ -55,8 +57,15 @@ def _cached_response(entry: dict, kind: str, normalized: str, timings: dict, sim
 
 
 def answer_query(req: QueryRequest) -> QueryResponse:
-    """Validated request -> normalise -> exact cache -> embed -> semantic cache -> hybrid search
-    (dense + BM25, RRF) -> rerank -> context assembly -> LLM -> cache."""
+    with closing(stream_query(req)) as events:
+        for _, response in events:
+            if response is not None:
+                return response
+    raise RuntimeError("Query stream ended without a final response.")
+
+
+def stream_query(req: QueryRequest) -> Iterator[tuple[str, QueryResponse | None]]:
+    start = time.perf_counter()
     s = get_settings()
     timings: dict[str, int] = {}
 
@@ -67,7 +76,10 @@ def answer_query(req: QueryRequest) -> QueryResponse:
         entry = redis_cache.get_exact(normalized)
         if entry and _from_cache(entry, req):
             timings["exact_cache"] = _ms(t)
-            return _cached_response(entry, "exact", normalized, timings)
+            response = _cached_response(entry, "exact", normalized, timings)
+            response.timings_ms["total"] = _ms(start)
+            yield response.answer, response
+            return
         timings["exact_cache"] = _ms(t)
 
     t = time.perf_counter()
@@ -79,14 +91,20 @@ def answer_query(req: QueryRequest) -> QueryResponse:
         found = redis_cache.get_semantic(query_vector)
         timings["semantic_cache"] = _ms(t)
         if found and _from_cache(found[0], req):
-            return _cached_response(found[0], "semantic", normalized, timings, similarity=found[1])
+            response = _cached_response(found[0], "semantic", normalized, timings, similarity=found[1])
+            response.timings_ms["total"] = _ms(start)
+            yield response.answer, response
+            return
 
     t = time.perf_counter()
     allowed = repository.accessible_document_ids(req.roles)
     hits = milvus_store.hybrid_search(normalized, query_vector, document_ids=allowed, limit=s.retrieval_top_k)
     timings["hybrid_search"] = _ms(t)
     if not hits:
-        return QueryResponse(answer=NO_CONTENT_ANSWER, cache="miss", normalized_query=normalized, sources=[], timings_ms=timings)
+        timings["total"] = _ms(start)
+        response = QueryResponse(answer=NO_CONTENT_ANSWER, cache="miss", normalized_query=normalized, sources=[], timings_ms=timings)
+        yield response.answer, response
+        return
 
     t = time.perf_counter()
     top = rerank(normalized, hits, s.rerank_top_n)
@@ -97,7 +115,12 @@ def answer_query(req: QueryRequest) -> QueryResponse:
     timings["context"] = _ms(t)
 
     t = time.perf_counter()
-    answer = generate_answer(req.query.strip(), context)
+    parts = []
+    with closing(stream_answer(req.query.strip(), context)) as fragments:
+        for fragment in fragments:
+            parts.append(fragment)
+            yield fragment, None
+    answer = "".join(parts)
     timings["generate"] = _ms(t)
 
     sources = [
@@ -120,7 +143,9 @@ def answer_query(req: QueryRequest) -> QueryResponse:
             "sources": [x.model_dump() for x in sources],
             "citations": [x.model_dump() for x in citations],
         })
-    return QueryResponse(
+    timings["total"] = _ms(start)
+    response = QueryResponse(
         answer=answer, cache="miss", normalized_query=normalized, sources=sources,
         citations=citations, timings_ms=timings,
     )
+    yield "", response

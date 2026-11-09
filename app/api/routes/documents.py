@@ -1,22 +1,14 @@
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.db import repository
-from app.processing.pipeline import process_version
-from app.services.document_service import UploadError, describe, needs_processing, register_upload
+from app.services.document_service import UploadError, describe, enqueue_processing, register_upload
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-def _run_processing(version_id: str) -> None:
-    try:
-        process_version(version_id)
-    except Exception:
-        pass  # already logged and recorded as 'failed' on the version
-
-
 @router.post("/upload")
 async def upload_documents(
-    background: BackgroundTasks,
     files: list[UploadFile] = File(...),
     acl_roles: str = Form("public"),
 ):
@@ -24,12 +16,10 @@ async def upload_documents(
     for f in files:
         name = f.filename or "file"
         try:
-            reg = register_upload(name, await f.read(), acl_roles)
+            reg = await run_in_threadpool(register_upload, name, await f.read(), acl_roles)
         except UploadError as e:
             raise HTTPException(status_code=400, detail=f"{name}: {e}")
-        queued = needs_processing(reg)
-        if queued:
-            background.add_task(_run_processing, reg.version_id)
+        queued = await run_in_threadpool(enqueue_processing, reg)
         results.append(
             {
                 "filename": name,

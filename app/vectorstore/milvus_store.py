@@ -31,15 +31,14 @@ def _is_local_uri(uri: str) -> bool:
 def _connect(uri: str) -> MilvusClient:
     if _is_local_uri(uri):
         Path(uri).parent.mkdir(parents=True, exist_ok=True)
-        return MilvusClient(
-            uri=uri,
-            dedicated=True,
-            grpc_options={
-                "grpc.keepalive_time_ms": 120000,
-                "grpc.keepalive_permit_without_calls": False,
-            },
-        )
-    return MilvusClient(uri=uri)
+    return MilvusClient(
+        uri=uri,
+        dedicated=True,
+        grpc_options={
+            "grpc.keepalive_time_ms": 120000,
+            "grpc.keepalive_permit_without_calls": False,
+        },
+    )
 
 
 @lru_cache(maxsize=1)
