@@ -1,4 +1,5 @@
 import inspect
+import math
 import threading
 from functools import lru_cache
 
@@ -64,5 +65,7 @@ def rerank_scores(query: str, documents: list[str]) -> list[float]:
 def rerank(query: str, hits: list[dict], top_n: int | None = None) -> list[dict]:
     top_n = top_n or get_settings().rerank_top_n
     scores = rerank_scores(query, [retrieval_text(h["text"], h.get("metadata") or {}) for h in hits])
+    if len(scores) != len(hits) or any(not math.isfinite(score) or not 0 <= score <= 1 for score in scores):
+        raise ValueError("Reranker returned invalid relevance scores.")
     ranked = sorted(zip(hits, scores), key=lambda p: p[1], reverse=True)[:top_n]
     return [{**h, "rerank_score": sc} for h, sc in ranked]

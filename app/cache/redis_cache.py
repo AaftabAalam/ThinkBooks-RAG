@@ -1,11 +1,8 @@
 import hashlib
 import json
 import logging
-import time
-import uuid
 from functools import lru_cache
 
-import numpy as np
 import redis
 
 from app.core.config import get_settings
@@ -25,9 +22,10 @@ def _namespace() -> str:
     s = get_settings()
     model = hashlib.sha256(
         f"{s.embedding_model}|{s.embedding_dim}|{s.llm_model}|{s.llm_max_tokens}|"
-        f"{s.context_max_tokens}|{s.reranker_model}|{s.retrieval_top_k}|{s.rerank_top_n}".encode()
+        f"{s.context_max_tokens}|{s.reranker_model}|{s.retrieval_top_k}|{s.rerank_top_n}|"
+        f"{s.rerank_min_score}".encode()
     ).hexdigest()[:16]
-    return f"{_PREFIX}v5:{s.milvus_collection}:{model}:"
+    return f"{_PREFIX}v6:{s.milvus_collection}:{model}:"
 
 
 def _exact_key(normalized_query: str) -> str:
@@ -43,60 +41,12 @@ def get_exact(normalized_query: str) -> dict | None:
         return None
 
 
-def get_semantic(query_vector: list[float]) -> tuple[dict, float] | None:
-    """Best cached entry whose cosine similarity to the query is >= the configured threshold."""
-    s = get_settings()
-    try:
-        r = _redis()
-        sem = _namespace() + "sem:"
-        sem_index = _namespace() + "semindex"
-        ids = [i.decode() for i in r.zrevrange(sem_index, 0, s.semantic_cache_max_entries - 1)]
-        if not ids:
-            return None
-        pipe = r.pipeline(transaction=False)
-        for i in ids:
-            pipe.hmget(sem + i, "emb", "entry")
-        rows = pipe.execute()
-        live = [(i, row) for i, row in zip(ids, rows) if row[0] is not None]
-        for i in set(ids) - {i for i, _ in live}:  # expired entries
-            r.zrem(sem_index, i)
-        if not live:
-            return None
-        matrix = np.vstack([np.frombuffer(row[0], dtype=np.float32) for _, row in live])
-        query = np.asarray(query_vector, dtype=np.float32)
-        # Vectors are L2-normalised, so the dot product equals cosine similarity.
-        scores = matrix @ query
-        best = int(np.argmax(scores))
-        if float(scores[best]) < s.semantic_cache_threshold:
-            return None
-        return json.loads(live[best][1][1]), float(scores[best])
-    except redis.RedisError:
-        logger.warning("Redis unavailable for semantic cache lookup", exc_info=True)
-        return None
-
-
-def store(normalized_query: str, query_vector: list[float], entry: dict) -> None:
+def store(query: str, entry: dict) -> None:
     s = get_settings()
     payload = json.dumps(entry)
     try:
         r = _redis()
-        r.set(_exact_key(normalized_query), payload, ex=s.cache_ttl_seconds)
-        if not s.semantic_cache_enabled:
-            return
-        sem = _namespace() + "sem:"
-        sem_index = _namespace() + "semindex"
-        sem_id = uuid.uuid4().hex
-        key = sem + sem_id
-        pipe = r.pipeline()
-        pipe.hset(key, mapping={"emb": np.asarray(query_vector, dtype=np.float32).tobytes(), "entry": payload})
-        pipe.expire(key, s.cache_ttl_seconds)
-        pipe.zadd(sem_index, {sem_id: time.time()})
-        pipe.execute()
-        overflow = r.zcard(sem_index) - s.semantic_cache_max_entries
-        if overflow > 0:
-            for old in r.zrange(sem_index, 0, overflow - 1):
-                r.delete(sem + old.decode())
-                r.zrem(sem_index, old)
+        r.set(_exact_key(query), payload, ex=s.cache_ttl_seconds)
     except redis.RedisError:
         logger.warning("Redis unavailable; answer not cached", exc_info=True)
 

@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -31,13 +32,11 @@ class Settings(BaseSettings):
     embedding_max_seq_length: int = 8192
 
     # Query pipeline
-    semantic_cache_enabled: bool = False
-    semantic_cache_threshold: float = 0.90
-    semantic_cache_max_entries: int = 1000
     cache_ttl_seconds: int = 86400
     retrieval_top_k: int = 15  # candidates per retriever and after RRF
     rrf_k: int = 60
     rerank_top_n: int = 4
+    rerank_min_score: float = Field(default=0.5, gt=0, le=1, allow_inf_nan=False)
     reranker_batch_size: int = 4
     reranker_max_length: int = 2048
     context_max_tokens: int = 3000

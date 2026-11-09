@@ -112,10 +112,11 @@ stored upload is missing, the uploaded bytes restore it.
 
 The Ask tab streams the answer and displays total time when complete. Disable
 the **Use cache** checkbox when testing retrieval and answer quality. An exact
-cache entry is still validated against document versions and roles. Semantic
-answer reuse is disabled by default because similar questions may have
-different answers; `SEMANTIC_CACHE_ENABLED=true` opts back in. Cache entries
-are scoped by Milvus collection and model settings and expire according to
+cache entry is still validated against document versions and roles. Answer
+reuse is limited to the exact question, since similar questions may have
+different answers. The former semantic cache setting no longer enables reuse.
+The new cache namespace excludes answers generated under the old policy.
+Cache entries are scoped by Milvus collection and model settings and expire according to
 `CACHE_TTL_SECONDS`. Source numbers correspond to answer citations. To inspect
 the stored text, use the document and chunk IDs from the query API response with
 `GET /api/documents/{document_id}/chunks?limit=1000`.
@@ -136,9 +137,18 @@ up to four chunks and supplies up to 3,000 context tokens to
 generation is 4,500 tokens, and a response reaching that limit is marked as
 possibly incomplete. The model's window is 32,768 tokens; the smaller retrieval
 budget is a latency/coverage trade-off and may omit relevant information.
-Search always returns nearest candidates when available; the model is instructed
-to say when context does not answer the question, but this is not a guaranteed
-relevance classifier. Inspect answers against source data.
+Search can return nearest candidates even for unrelated questions. Each
+reranked chunk must meet `RERANK_MIN_SCORE` (default 0.5, greater than 0 and
+at most 1) before it can enter the context. If none qualify, or the model
+signals that the supplied context cannot answer, the response is an apology
+with no sources or citations. An invalid or incomplete model answerability
+marker is logged and also returns the apology without displaying model output.
+A higher threshold can reject useful information.
+This threshold is a heuristic, not a calibrated guarantee: the reranker and
+model can misclassify relevance or follow malicious document instructions.
+They do not prevent disclosure of unrelated content in all cases. Use proper
+document access controls and isolation for confidential data; inspect answers
+against source data.
 
 New Milvus collections index headings together with chunk text for BM25 while
 preserving the original chunk text separately. The reranker also sees these
